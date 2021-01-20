@@ -29,6 +29,28 @@ class BaseModel(Model):
 class Order(BaseModel):
 	"""
 		Orders placed and managed by btfd_bot
+	"""
+	STATUS__OPEN = 'open'
+	STATUS__PENDING = 'pending'
+	STATUS__DONE = 'done'
+	STATUS__CANCELLED = 'cancelled'
+	STATUS__REJECTED = 'rejected'
+
+	order_id = CharField(unique=True)
+	percent_diff = DecimalField(null=True)
+	target_price = DecimalField()
+	size = DecimalField()
+	market_name = CharField()
+	side = CharField()
+	status = CharField()	# open, pending, active, done
+	done_reason = CharField(null=True)
+	created = DateTimeField()
+	updated = DateTimeField(null=True)
+	raw_data = JSONField()
+
+
+def update_order_from_json(order, raw_json, percent_diff=None):
+	"""
 		{
 			'id': '33295403-e044-470c-93e3-49a554841142',
 			'price': '6453.42000000',
@@ -49,33 +71,23 @@ class Order(BaseModel):
 			'settled': True
 		}
 	"""
-	order_id = CharField(unique=True)
-	percent_diff = DecimalField(null=True)
-	target_price = DecimalField()
-	size = DecimalField()
-	market_name = CharField()
-	side = CharField()
-	status = CharField()	# open, pending, active, done
-	done_reason = CharField(null=True)
-	created = DateTimeField()
-	updated = DateTimeField(null=True)
-	raw_data = JSONField()
-
-
-def update_order_from_json(order, raw_json, percent_diff=None):
-	order.order_id = raw_json.get("id")
-	order.percent_diff = percent_diff
-	order.target_price = Decimal(raw_json.get("price"))
-	order.size = Decimal(raw_json.get("size"))
-	order.market_name = raw_json.get("product_id")
-	order.side = raw_json.get("side")
-	order.status = raw_json.get("status")
-	order.created = utils.convert_datetime_str(raw_json.get("created_at"))
-	order.raw_data = raw_json
-	if raw_json.get("done_at"):
-		order.updated = utils.convert_datetime_str(raw_json.get("done_at"))
-		order.done_reason = raw_json.get("done_reason")
-	order.save()
+	try:
+		order.order_id = raw_json.get("id")
+		order.percent_diff = percent_diff
+		order.target_price = Decimal(raw_json.get("price"))
+		order.size = Decimal(raw_json.get("size"))
+		order.market_name = raw_json.get("product_id")
+		order.side = raw_json.get("side")
+		order.status = raw_json.get("status")
+		order.created = utils.convert_datetime_str(raw_json.get("created_at"))
+		order.raw_data = raw_json
+		if raw_json.get("done_at"):
+			order.updated = utils.convert_datetime_str(raw_json.get("done_at"))
+			order.done_reason = raw_json.get("done_reason")
+		order.save()
+	except Exception as e:
+		print(raw_json)
+		raise e
 
 
 def create_order_from_json(raw_json, percent_diff=None):

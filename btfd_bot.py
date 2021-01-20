@@ -8,6 +8,7 @@ import dateutil
 import decimal
 import json
 import math
+import pytz
 import sys
 import time
 
@@ -15,6 +16,7 @@ import cbpro
 
 from decimal import Decimal
 from models import Order, create_order_from_json, update_order_from_json
+from utils import convert_datetime_str
 
 
 
@@ -158,10 +160,10 @@ if __name__ == "__main__":
             else:
                 raise Exception("amount_currency %s not in market %s" % (amount_currency,
                                                                          market_name))
-            print(product)
+            # print(json.dumps(product, indent=2))
 
-    print("base_min_size: %s" % base_min_size)
-    print("quote_increment: %s" % quote_increment)
+    # print("base_min_size: %s" % base_min_size)
+    # print("quote_increment: %s" % quote_increment)
 
     # Prep boto SNS client for email notifications
     sns = boto3.client(
@@ -194,21 +196,38 @@ if __name__ == "__main__":
             quote_currency_hold = Decimal(account.get("hold")).quantize(quote_increment)
         if base_currency_balance and quote_currency_balance:
             break
-    print(f" base_currency_balance: {base_currency_balance} {base_currency}")
-    print(f"    base_currency_hold: {base_currency_hold} {base_currency}")
-    print(f"quote_currency_balance: {quote_currency_balance} {quote_currency}")
-    print(f"   quote_currency_hold: {quote_currency_hold} {quote_currency}")
+    print(f"--------------------------------------------------------")
+    print(f"\t base_currency_balance:  {base_currency_balance} {base_currency}")
+    print(f"\t base_currency_hold:     {base_currency_hold} {base_currency}")
+    print(f"\t quote_currency_balance: {quote_currency_balance} {quote_currency}")
+    print(f"\t quote_currency_hold:    {quote_currency_hold} {quote_currency}")
+    print(f"--------------------------------------------------------")
 
     # Get the current btfd order
+    date_last_updated = None
     try:
         order = Order.filter(
             market_name=market_name,
-            status__in=["open", "pending"],
+            status__in=[Order.STATUS__OPEN, Order.STATUS__PENDING],
             side=order_side
         ).order_by(Order.created.desc()).first()
 
         if not order:
+            print("No open order. Creating a new one")
             order = Order()
+
+            # ...but it might make sense to pick up where the last one left off.
+            prev_order = Order.filter(
+                market_name=market_name,
+                side=order_side
+            ).order_by(Order.created.desc()).first()
+            if prev_order:
+                if prev_order.updated:
+                    print(f"Using order {prev_order.id}'s updated: {prev_order.updated}")
+                    date_last_updated = prev_order.updated
+                else:
+                    print(f"Using order {prev_order.id}'s created: {prev_order.created}")
+                    date_last_updated = prev_order.created
         else:
             print(f"Retrieved order {order.id}: {order.order_id}")
 
@@ -217,41 +236,55 @@ if __name__ == "__main__":
             if not order_json:
                 raise Exception(f"Could not retrieve order {order.order_id}")
 
-            update_order_from_json(order, order_json, percent_diff)
+            if order_json.get("message") == "NotFound":
+                # Order was probably manually cancelled
+                order.status = Order.STATUS__CANCELLED
+                order.save()
 
-            if order.status not in ["open", "pending"]:
-                # Order status is no longer pending!
-                sns.publish(
-                    TopicArn=sns_topic,
-                    Subject="%s %s order of %s %s %s @ %s %s" % (
+                date_last_updated = order.created
+                order = Order()
+
+            else:
+                date_last_updated = order.created
+                update_order_from_json(order, order_json, percent_diff)
+
+                if order.status not in [Order.STATUS__OPEN, Order.STATUS__PENDING]:
+                    # Order status is no longer pending!
+                    print(json.dumps(order_json, indent=2))
+                    if order.status == Order.STATUS__DONE:
+                        if percent_diff < 0:
+                            subject = "Bought the dip!"
+                        else:
+                            subject = "Sold the pump!"
+                        date_last_updated = order.updated
+                    else:
+                        subject = "ERROR:"
+
+                    sns.publish(
+                        TopicArn=sns_topic,
+                        Subject=f"{subject} {market_name} {order_side} order of {amount} {amount_currency} {order.status} @ {order.target_price} {quote_currency}",
+                        Message=json.dumps(order_json, sort_keys=True, indent=4)
+                    )
+
+                    print("%s: DONE: %s %s order of %s %s %s @ %s %s" % (
+                        datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         market_name,
                         order_side,
                         amount,
                         amount_currency,
                         order.status,
                         order.target_price,
-                        quote_currency
-                    ),
-                    Message=json.dumps(order, sort_keys=True, indent=4)
-                )
+                        quote_currency))
 
-                print("%s: DONE: %s %s order of %s %s %s @ %s %s" % (
-                    get_timestamp(),
-                    market_name,
-                    order_side,
-                    amount,
-                    amount_currency,
-                    order.status,
-                    order.target_price,
-                    quote_currency))
-
-                # Now we'll need to prep a new order, starting from the previous one's fill date.
-                order = Order()
+                    # Now we'll need to prep a new order, starting from the previous one's fill date.
+                    order = Order()
 
     except Exception as e:
         # Shouldn't be possible. Once an order is filled we should have placed a new one.
         print(e)
         raise e
+    if date_last_updated:
+        print(f"date_last_updated: {date_last_updated} ({int(pytz.utc.localize(date_last_updated).timestamp())})")
 
     """
         We'll retrieve the most recent 300 1-minute candles so this must be run at least
@@ -265,30 +298,58 @@ if __name__ == "__main__":
     )
 
     # Scan for new recent_extreme from...
-    if order.updated:
+    if date_last_updated:
         # ...last check
-        recent_extreme_from_date = int(order.updated.timestamp())
+        #   (dates from the db have no TZ; must force to utc to avoid local TZ shift assumptions)
+        recent_extreme_from_date = int(pytz.utc.localize(date_last_updated).timestamp())
     else:
         # ...or across the whole range of market_data
         recent_extreme_from_date = market_data[-1][0]
 
     print(f"recent_extreme_from_date: {recent_extreme_from_date}")
+    # print(f" market_data[0][0]: {market_data[0][0]}")
+    # print(f"market_data[-1][0]: {market_data[-1][0]}")
 
-    if percent_diff < 0:
-        # BUY THE F'N DIP! Identify recent high
-        recent_extreme = Decimal(max([d[2] for d in market_data if d[0] > recent_extreme_from_date])).quantize(quote_increment)
+    # Use the 24hr stats for the current price
+    """
+        {
+            "open": "6745.61000000", 
+            "high": "7292.11000000", 
+            "low": "6650.00000000", 
+            "volume": "26185.51325269", 
+            "last": "6813.19000000", 
+            "volume_30day": "1019451.11188405"
+        }
+    """
+    stats = public_client.get_product_24hr_stats(market_name)
+    current_price = Decimal(stats.get("last")).quantize(quote_increment)
+
+    if market_data[0][0] < recent_extreme_from_date:
+        # The last order was just recently completed within the ~5min lag time of the market_data candles.
+        #   Use the current_price as a good-enough stand in for our new recent_extreme.
+        recent_extreme = current_price
+        print("Last order just closed; have to use current price for recent_extreme")
     else:
-        recent_extreme = Decimal(min([d[1] for d in market_data if d[0] > recent_extreme_from_date])).quantize(quote_increment)
-
-    # Assume the first candle retrieved is close enough to the current price
-    current_price = Decimal(market_data[0][4]).quantize(quote_increment)
+        if percent_diff < 0:
+            # BUY THE F'N DIP! Identify recent high
+            recent_extreme = Decimal(max([d[2] for d in market_data if d[0] > recent_extreme_from_date])).quantize(quote_increment)
+            if current_price > recent_extreme:
+                # Price has moved further in the ~5min lag time
+                recent_extreme = current_price
+        else:
+            recent_extreme = Decimal(min([d[1] for d in market_data if d[0] > recent_extreme_from_date])).quantize(quote_increment)
+            if current_price < recent_extreme:
+                # Price has moved further in the ~5min lag time
+                recent_extreme = current_price
 
     target_price = (recent_extreme*(Decimal('100.0') + percent_diff)/Decimal('100.0')).quantize(quote_increment)
-    print(f"recent_extreme: {recent_extreme} {quote_currency}")
-    print(f"target_price:   {target_price} {quote_currency} ({percent_diff}%)")
-    print(f"current_price:  {current_price} {quote_currency} ({(current_price/recent_extreme*Decimal('100')).quantize(Decimal('0.1')) - Decimal('100.')}%)")
+    print(f"--------------------------------------------------------")
+    print(f"\t recent_extreme: {recent_extreme} {quote_currency}")
+    print(f"\t target_price:   {target_price} {quote_currency} ({percent_diff}%)")
+    print(f"\t current_price:  {current_price} {quote_currency} ({(current_price/recent_extreme*Decimal('100')).quantize(Decimal('0.1')) - Decimal('100.')}%)")
     if order.order_id:
-        print(f"current_order:  {order.target_price.quantize(quote_increment)} {quote_currency}")
+        print(f"\t current_order:  {order.target_price.quantize(quote_increment)} {quote_currency}")
+    print(f"--------------------------------------------------------")
 
     # If we're buying the dip, follow the target_price up as needed; if we're selling the
     #   pump, follow the target_price down.
@@ -333,12 +394,14 @@ if __name__ == "__main__":
                 "settled": false
             }
         """
+        print(f"--------------------------------------------------------")
         print(f"Placing limit order:")
-        print(f"\tproduct_id: {market_name}")
-        print(f"\t      side: {order_side}")
-        print(f"\t     price: {target_price} {quote_currency}")
-        print(f"\t    amount: {base_currency_amount} {base_currency}")
-        print(f"\t     value: {(base_currency_amount * target_price).quantize(quote_increment)} {quote_currency}")
+        print(f"\t market: {market_name}")
+        print(f"\t side:   {order_side}")
+        print(f"\t price:  {target_price} {quote_currency}")
+        print(f"\t amount: {base_currency_amount} {base_currency}")
+        print(f"\t value:  {(base_currency_amount * target_price).quantize(quote_increment)} {quote_currency}")
+        print(f"--------------------------------------------------------")
         result = auth_client.place_limit_order(
             product_id=market_name,
             side=order_side,
@@ -364,7 +427,7 @@ if __name__ == "__main__":
             )
             exit()
 
-        if result and "status" in result and result["status"] == "rejected":
+        if result and "status" in result and result["status"] == Order.STATUS__REJECTED:
             # Rejected - usually because price was above lowest sell offer. Try
             #   again in the next loop.
             print("%s: %s Order rejected @ %f %s" % (get_timestamp(),
