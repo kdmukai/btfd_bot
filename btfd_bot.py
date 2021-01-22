@@ -205,84 +205,77 @@ if __name__ == "__main__":
 
     # Get the current btfd order
     date_last_updated = None
-    try:
-        order = Order.filter(
-            market_name=market_name,
-            status__in=[Order.STATUS__OPEN, Order.STATUS__PENDING],
-            side=order_side
-        ).order_by(Order.created.desc()).first()
+    order = Order.filter(
+        market_name=market_name,
+        status__in=[Order.STATUS__OPEN, Order.STATUS__PENDING],
+        side=order_side
+    ).order_by(Order.created.desc()).first()
 
-        if not order:
-            print("No open order. Creating a new one")
+    if not order:
+        print("No open order. Creating a new one")
+        order = Order()
+
+    else:
+        print(f"Retrieved order {order.id}: {order.order_id}")
+
+        # Update the order's status
+        order_json = auth_client.get_order(order.order_id)
+        if not order_json:
+            raise Exception(f"Could not retrieve order {order.order_id}")
+
+        if order_json.get("message") == "NotFound":
+            # Order was probably manually cancelled
+            order.status = Order.STATUS__CANCELLED
+            order.save()
+
             order = Order()
 
-            # ...but it might make sense to pick up where the last one left off.
-            prev_order = Order.filter(
-                market_name=market_name,
-                side=order_side
-            ).order_by(Order.created.desc()).first()
-            if prev_order:
-                if prev_order.updated:
-                    print(f"Using order {prev_order.id}'s updated: {prev_order.updated}")
-                    date_last_updated = prev_order.updated
-                else:
-                    print(f"Using order {prev_order.id}'s created: {prev_order.created}")
-                    date_last_updated = prev_order.created
         else:
-            print(f"Retrieved order {order.id}: {order.order_id}")
+            date_last_updated = order.created
+            update_order_from_json(order, order_json, percent_diff)
 
-            # Update the order's status
-            order_json = auth_client.get_order(order.order_id)
-            if not order_json:
-                raise Exception(f"Could not retrieve order {order.order_id}")
+            if order.status not in [Order.STATUS__OPEN, Order.STATUS__PENDING]:
+                # Order status is no longer pending!
+                print(json.dumps(order_json, indent=2))
+                if order.status == Order.STATUS__DONE:
+                    if percent_diff < 0:
+                        subject = "Bought the dip!"
+                    else:
+                        subject = "Sold the pump!"
+                    date_last_updated = order.updated
+                else:
+                    subject = "ERROR:"
 
-            if order_json.get("message") == "NotFound":
-                # Order was probably manually cancelled
-                order.status = Order.STATUS__CANCELLED
-                order.save()
+                sns.publish(
+                    TopicArn=sns_topic,
+                    Subject=f"{subject} {market_name} {order_side} order of {amount} {amount_currency} {order.status} @ {order.target_price} {quote_currency}",
+                    Message=json.dumps(order_json, sort_keys=True, indent=4)
+                )
 
-                date_last_updated = order.created
+                print("%s: DONE: %s %s order of %s %s %s @ %s %s" % (
+                    datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    market_name,
+                    order_side,
+                    amount,
+                    amount_currency,
+                    order.status,
+                    order.target_price,
+                    quote_currency))
+
+                # Now we'll need to prep a new order, starting from the previous one's fill date.
                 order = Order()
 
-            else:
-                date_last_updated = order.created
-                update_order_from_json(order, order_json, percent_diff)
+    if not date_last_updated:
+        # We're creating a new order, but try to pick up where the last one left off.
+        prev_order = Order.filter(
+            market_name=market_name,
+            status__in=Order.STATUS__DONE,
+            side=order_side
+        ).order_by(Order.created.desc()).first()
+        if prev_order:
+            print(f"Using order {prev_order.id}'s created: {prev_order.created}")
+            date_last_updated = prev_order.created
 
-                if order.status not in [Order.STATUS__OPEN, Order.STATUS__PENDING]:
-                    # Order status is no longer pending!
-                    print(json.dumps(order_json, indent=2))
-                    if order.status == Order.STATUS__DONE:
-                        if percent_diff < 0:
-                            subject = "Bought the dip!"
-                        else:
-                            subject = "Sold the pump!"
-                        date_last_updated = order.updated
-                    else:
-                        subject = "ERROR:"
-
-                    sns.publish(
-                        TopicArn=sns_topic,
-                        Subject=f"{subject} {market_name} {order_side} order of {amount} {amount_currency} {order.status} @ {order.target_price} {quote_currency}",
-                        Message=json.dumps(order_json, sort_keys=True, indent=4)
-                    )
-
-                    print("%s: DONE: %s %s order of %s %s %s @ %s %s" % (
-                        datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        market_name,
-                        order_side,
-                        amount,
-                        amount_currency,
-                        order.status,
-                        order.target_price,
-                        quote_currency))
-
-                    # Now we'll need to prep a new order, starting from the previous one's fill date.
-                    order = Order()
-
-    except Exception as e:
-        # Shouldn't be possible. Once an order is filled we should have placed a new one.
-        print(e)
-        raise e
     if date_last_updated:
         print(f"date_last_updated: {date_last_updated} ({int(pytz.utc.localize(date_last_updated).timestamp())})")
 
