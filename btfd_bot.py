@@ -269,7 +269,7 @@ if __name__ == "__main__":
         # We're creating a new order, but try to pick up where the last one left off.
         prev_order = Order.filter(
             market_name=market_name,
-            status__in=Order.STATUS__DONE,
+            status=Order.STATUS__DONE,
             side=order_side
         ).order_by(Order.created.desc()).first()
         if prev_order:
