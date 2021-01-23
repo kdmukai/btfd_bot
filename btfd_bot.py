@@ -15,8 +15,8 @@ import time
 import cbpro
 
 from decimal import Decimal
-from models import Order, create_order_from_json, update_order_from_json
-from utils import convert_datetime_str
+from models import Order
+from utils import convert_datetime_str, convert_epoch_to_utc
 
 
 
@@ -26,21 +26,20 @@ def get_timestamp():
 
 
 """
-    Basic Coinbase Pro DCA buy/sell bot that pulls the current market price, subtracts a
-        small spread to generate a valid price (see note below), then submits the trade as
-        a limit order.
-
-    This is meant to be run as a crontab to make regular buys/sells on a set schedule.
+    This is meant to be run as a crontab to make regular updates to the trailing buy/sell orders.
 """
 parser = argparse.ArgumentParser(
     description="""
-        This is a basic Coinbase Pro BUY THE FUCKING DIP bot (or optional sell-the-pump).
+        This is a basic Coinbase Pro BUY THE FUCKING DIP bot (or can also sell the pump).
 
         ex:
             BTC-USD BUY 14 USD -10.0         (buy $14 worth of BTC @ -10% dip from recent high)
             BTC-USD BUY 0.00125 BTC -10.0    (buy 0.00125 BTC @ -10% dip from recent high)
             ETH-BTC SELL 0.00125 BTC 5.5     (sell 0.00125 BTC worth of ETH @ +5.5% pump from recent low)
             ETH-BTC SELL 0.1 ETH 5.5         (sell 0.1 ETH @ +5.5% pump from recent low)
+
+        Includes optional 200MA (15min close) limit mode where it'll only set trailing buys if the
+        price has dipped below the 200MA (or above for selling the pump).
     """,
     formatter_class=argparse.RawTextHelpFormatter
 )
@@ -70,12 +69,11 @@ parser.add_argument('-sandbox',
                     dest="sandbox_mode",
                     help="Run against sandbox, skips user confirmation prompt")
 
-parser.add_argument('-warn_after',
-                    default=3600,
-                    action="store",
-                    type=int,
-                    dest="warn_after",
-                    help="secs to wait before sending an alert that an order isn't done")
+parser.add_argument('-m', '--ma_limit',
+                    default=False,
+                    action="store_true",
+                    dest="use_ma_limit",
+                    help="Enable optional 200MA (15min) limit")
 
 parser.add_argument('-j', '--job',
                     action="store_true",
@@ -101,6 +99,7 @@ if __name__ == "__main__":
     percent_diff = args.percent_diff
 
     sandbox_mode = args.sandbox_mode
+    use_ma_limit = args.use_ma_limit
     job_mode = args.job_mode
     warn_after = args.warn_after
 
@@ -232,7 +231,7 @@ if __name__ == "__main__":
 
         else:
             date_last_updated = order.created
-            update_order_from_json(order, order_json, percent_diff)
+            order.update_from_json(order_json, percent_diff)
 
             if order.status not in [Order.STATUS__OPEN, Order.STATUS__PENDING]:
                 # Order status is no longer pending!
@@ -280,6 +279,39 @@ if __name__ == "__main__":
         print(f"date_last_updated: {date_last_updated} ({int(pytz.utc.localize(date_last_updated).timestamp())})")
 
     """
+        Grab the last 300 15-min candles to calculate the 200MA on the 15-min close
+        [ time, low, high, open, close, volume ]
+    """
+    CANDLE_TIME = 0
+    CANDLE_LOW = 1
+    CANDLE_HIGH = 2
+    CANDLE_OPEN = 3
+    CANDLE_CLOSE = 4
+    CANDLE_VOLUME = 5
+    market_data = public_client.get_product_historic_rates(
+        market_name,
+        granularity=60*15    # 15-minute candles
+    )
+
+    ma_limit = None
+    if use_ma_limit:
+        # Calculate the 200 MA for the 15min candles, find the most recent dip below it (or spike above)
+        for index, candle in enumerate(market_data):
+            if len(market_data) - index < 200:
+                break
+            cur_200ma = Decimal(sum([c[CANDLE_CLOSE] for c in market_data[index:index + 200]]) / 200.0).quantize(quote_increment)
+            print(f"{convert_epoch_to_utc(candle[CANDLE_TIME])}: {cur_200ma}")
+            if (percent_diff < 0 and candle[CANDLE_HIGH] > cur_200ma) or (percent_diff > 0 and candle[CANDLE_LOW] < cur_200ma):
+                # Current candle is above the 200MA; this is our hard limit
+                ma_limit = cur_200ma
+                break
+
+        if ma_limit:
+            print(f"ma_limit set at {ma_limit} from {convert_epoch_to_utc(candle[CANDLE_TIME])} (UTC)")
+        else:
+            print(f"The 200MA was not breached through {convert_epoch_to_utc(market_data[200][CANDLE_TIME])}")
+
+    """
         We'll retrieve the most recent 300 1-minute candles so this must be run at least
         every 5hrs (more likely we'll run this every 5min).
 
@@ -297,11 +329,9 @@ if __name__ == "__main__":
         recent_extreme_from_date = int(pytz.utc.localize(date_last_updated).timestamp())
     else:
         # ...or across the whole range of market_data
-        recent_extreme_from_date = market_data[-1][0]
+        recent_extreme_from_date = market_data[-1][CANDLE_TIME]
 
-    print(f"recent_extreme_from_date: {recent_extreme_from_date}")
-    # print(f" market_data[0][0]: {market_data[0][0]}")
-    # print(f"market_data[-1][0]: {market_data[-1][0]}")
+    print(f"recent_extreme_from_date: {convert_epoch_to_utc(recent_extreme_from_date)} (UTC)")
 
     # Use the 24hr stats for the current price
     """
@@ -317,7 +347,7 @@ if __name__ == "__main__":
     stats = public_client.get_product_24hr_stats(market_name)
     current_price = Decimal(stats.get("last")).quantize(quote_increment)
 
-    if market_data[0][0] < recent_extreme_from_date:
+    if market_data[0][CANDLE_TIME] < recent_extreme_from_date:
         # The last order was just recently completed within the ~5min lag time of the market_data candles.
         #   Use the current_price as a good-enough stand in for our new recent_extreme.
         recent_extreme = current_price
@@ -325,15 +355,21 @@ if __name__ == "__main__":
     else:
         if percent_diff < 0:
             # BUY THE F'N DIP! Identify recent high
-            recent_extreme = Decimal(max([d[2] for d in market_data if d[0] > recent_extreme_from_date])).quantize(quote_increment)
+            recent_extreme = Decimal(max([d[CANDLE_HIGH] for d in market_data if d[CANDLE_TIME] > recent_extreme_from_date])).quantize(quote_increment)
             if current_price > recent_extreme:
                 # Price has moved further in the ~5min lag time
                 recent_extreme = current_price
         else:
-            recent_extreme = Decimal(min([d[1] for d in market_data if d[0] > recent_extreme_from_date])).quantize(quote_increment)
+            recent_extreme = Decimal(min([d[CANDLE_LOW] for d in market_data if d[CANDLE_TIME] > recent_extreme_from_date])).quantize(quote_increment)
             if current_price < recent_extreme:
                 # Price has moved further in the ~5min lag time
                 recent_extreme = current_price
+
+    if use_ma_limit:
+        if (percent_diff < 0 and recent_extreme > ma_limit) or (percent_diff > 0 and recent_extreme < ma_limit):
+            # Constrain the recent_extreme by the ma_limit
+            print(f"Enforcing MA limit: {recent_extreme} capped at {ma_limit}")
+            recent_extreme = ma_limit
 
     target_price = (recent_extreme*(Decimal('100.0') + percent_diff)/Decimal('100.0')).quantize(quote_increment)
     print(f"--------------------------------------------------------")
@@ -428,5 +464,5 @@ if __name__ == "__main__":
                                                      current_price,
                                                      quote_currency))
 
-        update_order_from_json(order, result, percent_diff=percent_diff)
+        order.update_from_json(result, percent_diff=percent_diff)
 
