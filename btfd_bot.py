@@ -101,7 +101,6 @@ if __name__ == "__main__":
     sandbox_mode = args.sandbox_mode
     use_ma_limit = args.use_ma_limit
     job_mode = args.job_mode
-    warn_after = args.warn_after
 
     if not sandbox_mode and not job_mode:
         if sys.version_info[0] < 3:
