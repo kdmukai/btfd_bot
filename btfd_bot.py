@@ -287,7 +287,7 @@ if __name__ == "__main__":
     CANDLE_OPEN = 3
     CANDLE_CLOSE = 4
     CANDLE_VOLUME = 5
-    market_data = public_client.get_product_historic_rates(
+    fifteen_minute_candles = public_client.get_product_historic_rates(
         market_name,
         granularity=60*15    # 15-minute candles
     )
@@ -295,20 +295,23 @@ if __name__ == "__main__":
     ma_limit = None
     if use_ma_limit:
         # Calculate the 200 MA for the 15min candles, find the most recent dip below it (or spike above)
-        for index, candle in enumerate(market_data):
-            if len(market_data) - index < 200:
+        for index, candle in enumerate(fifteen_minute_candles):
+            if len(fifteen_minute_candles) - index < 200:
                 break
-            cur_200ma = Decimal(sum([c[CANDLE_CLOSE] for c in market_data[index:index + 200]]) / 200.0).quantize(quote_increment)
-            print(f"{convert_epoch_to_utc(candle[CANDLE_TIME])}: {cur_200ma}")
+            cur_200ma = Decimal(sum([c[CANDLE_CLOSE] for c in fifteen_minute_candles[index:index + 200]]) / 200.0).quantize(quote_increment)
+            print(f"200MA: {convert_epoch_to_utc(candle[CANDLE_TIME])}: {cur_200ma}")
             if (percent_diff < 0 and candle[CANDLE_HIGH] > cur_200ma) or (percent_diff > 0 and candle[CANDLE_LOW] < cur_200ma):
                 # Current candle is above the 200MA; this is our hard limit
+                # Set time to just before the start of the next 15-min candle so that no part of this 15-min candle
+                #    is considered when we look at the 1-min candles next.
+                date_last_updated = convert_epoch_to_utc(candle[CANDLE_TIME] + 15 * 60 - 1)
                 ma_limit = cur_200ma
                 break
 
         if ma_limit:
             print(f"ma_limit set at {ma_limit} from {convert_epoch_to_utc(candle[CANDLE_TIME])} (UTC)")
         else:
-            print(f"The 200MA was not breached through {convert_epoch_to_utc(market_data[200][CANDLE_TIME])}")
+            print(f"The 200MA was not breached through {convert_epoch_to_utc(fifteen_minute_candles[200][CANDLE_TIME])}")
 
     """
         We'll retrieve the most recent 300 1-minute candles so this must be run at least
@@ -316,7 +319,7 @@ if __name__ == "__main__":
 
         [ time, low, high, open, close, volume ]
     """
-    market_data = public_client.get_product_historic_rates(
+    one_minute_candles = public_client.get_product_historic_rates(
         market_name,
         granularity=60    # minute candles
     )
@@ -327,8 +330,8 @@ if __name__ == "__main__":
         #   (dates from the db have no TZ; must force to utc to avoid local TZ shift assumptions)
         recent_extreme_from_date = int(pytz.utc.localize(date_last_updated).timestamp())
     else:
-        # ...or across the whole range of market_data
-        recent_extreme_from_date = market_data[-1][CANDLE_TIME]
+        # ...or across the whole range of one_minute_candles
+        recent_extreme_from_date = one_minute_candles[-1][CANDLE_TIME]
 
     print(f"recent_extreme_from_date: {convert_epoch_to_utc(recent_extreme_from_date)} (UTC)")
 
@@ -346,28 +349,28 @@ if __name__ == "__main__":
     stats = public_client.get_product_24hr_stats(market_name)
     current_price = Decimal(stats.get("last")).quantize(quote_increment)
 
-    if market_data[0][CANDLE_TIME] < recent_extreme_from_date:
-        # The last order was just recently completed within the ~5min lag time of the market_data candles.
+    if one_minute_candles[0][CANDLE_TIME] <= recent_extreme_from_date:
+        # The last order was just recently completed within the ~5min lag time of the one_minute_candles candles.
         #   Use the current_price as a good-enough stand in for our new recent_extreme.
         recent_extreme = current_price
         print("Last order just closed; have to use current price for recent_extreme")
     else:
         if percent_diff < 0:
             # BUY THE F'N DIP! Identify recent high
-            recent_extreme = Decimal(max([d[CANDLE_HIGH] for d in market_data if d[CANDLE_TIME] > recent_extreme_from_date])).quantize(quote_increment)
+            recent_extreme = Decimal(max([d[CANDLE_HIGH] for d in one_minute_candles if d[CANDLE_TIME] > recent_extreme_from_date])).quantize(quote_increment)
             if current_price > recent_extreme:
                 # Price has moved further in the ~5min lag time
                 recent_extreme = current_price
         else:
-            recent_extreme = Decimal(min([d[CANDLE_LOW] for d in market_data if d[CANDLE_TIME] > recent_extreme_from_date])).quantize(quote_increment)
+            recent_extreme = Decimal(min([d[CANDLE_LOW] for d in one_minute_candles if d[CANDLE_TIME] > recent_extreme_from_date])).quantize(quote_increment)
             if current_price < recent_extreme:
                 # Price has moved further in the ~5min lag time
                 recent_extreme = current_price
 
     if use_ma_limit:
-        if (percent_diff < 0 and recent_extreme > ma_limit) or (percent_diff > 0 and recent_extreme < ma_limit):
+        if (percent_diff < 0 and ma_limit > recent_extreme) or (percent_diff > 0 and ma_limit < recent_extreme):
             # Constrain the recent_extreme by the ma_limit
-            print(f"Enforcing MA limit: {recent_extreme} capped at {ma_limit}")
+            print(f"Using MA limit: {recent_extreme} moved to {ma_limit}")
             recent_extreme = ma_limit
 
     target_price = (recent_extreme*(Decimal('100.0') + percent_diff)/Decimal('100.0')).quantize(quote_increment)
@@ -430,6 +433,8 @@ if __name__ == "__main__":
         print(f"\t amount: {base_currency_amount} {base_currency}")
         print(f"\t value:  {(base_currency_amount * target_price).quantize(quote_increment)} {quote_currency}")
         print(f"--------------------------------------------------------")
+
+        exit(1)
         result = auth_client.place_limit_order(
             product_id=market_name,
             side=order_side,
