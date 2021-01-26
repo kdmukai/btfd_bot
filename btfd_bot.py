@@ -433,8 +433,6 @@ if __name__ == "__main__":
         print(f"\t amount: {base_currency_amount} {base_currency}")
         print(f"\t value:  {(base_currency_amount * target_price).quantize(quote_increment)} {quote_currency}")
         print(f"--------------------------------------------------------")
-
-        exit(1)
         result = auth_client.place_limit_order(
             product_id=market_name,
             side=order_side,
