@@ -301,10 +301,12 @@ if __name__ == "__main__":
             cur_200ma = Decimal(sum([c[CANDLE_CLOSE] for c in fifteen_minute_candles[index:index + 200]]) / 200.0).quantize(quote_increment)
             print(f"200MA: {convert_epoch_to_utc(candle[CANDLE_TIME])}: {cur_200ma}")
             if (percent_diff < 0 and candle[CANDLE_HIGH] > cur_200ma) or (percent_diff > 0 and candle[CANDLE_LOW] < cur_200ma):
-                # Current candle is above the 200MA; this is our hard limit
+                # This candle is above the 200MA; this is our hard limit.
                 # Set time to just before the start of the next 15-min candle so that no part of this 15-min candle
                 #    is considered when we look at the 1-min candles next.
-                date_last_updated = convert_epoch_to_utc(candle[CANDLE_TIME] + 15 * 60 - 1)
+                candle_date = convert_epoch_to_utc(candle[CANDLE_TIME] + 15 * 60 - 1)
+                if candle_date > date_last_updated:
+                    date_last_updated = candle_date
                 ma_limit = cur_200ma
                 break
 
