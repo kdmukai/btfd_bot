@@ -202,7 +202,7 @@ if __name__ == "__main__":
     print(f"--------------------------------------------------------")
 
     # Get the current btfd order
-    date_last_updated = None
+    date_last_updated = convert_epoch_to_utc(0)
     order = Order.filter(
         market_name=market_name,
         status__in=[Order.STATUS__OPEN, Order.STATUS__PENDING],
