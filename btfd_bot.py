@@ -293,27 +293,32 @@ if __name__ == "__main__":
     )
 
     ma_limit = None
+    furthest_candle_date = None
     if use_ma_limit:
         # Calculate the 200 MA for the 15min candles, find the most recent dip below it (or spike above)
         for index, candle in enumerate(fifteen_minute_candles):
             if len(fifteen_minute_candles) - index < 200:
                 break
+            # Set time to just before the start of the next 15-min candle so that no part of this 15-min candle
+            #    is considered when we look at the 1-min candles next.
+            candle_date = convert_epoch_to_utc(candle[CANDLE_TIME] + 15 * 60 - 1)
+            furthest_candle_date = candle_date
+            if candle_date < date_last_updated:
+                # Can't look further back than our most recent Order
+                break
+
             cur_200ma = Decimal(sum([c[CANDLE_CLOSE] for c in fifteen_minute_candles[index:index + 200]]) / 200.0).quantize(quote_increment)
             print(f"200MA: {convert_epoch_to_utc(candle[CANDLE_TIME])}: {cur_200ma}")
             if (percent_diff < 0 and candle[CANDLE_HIGH] > cur_200ma) or (percent_diff > 0 and candle[CANDLE_LOW] < cur_200ma):
                 # This candle is above the 200MA; this is our hard limit.
-                # Set time to just before the start of the next 15-min candle so that no part of this 15-min candle
-                #    is considered when we look at the 1-min candles next.
-                candle_date = convert_epoch_to_utc(candle[CANDLE_TIME] + 15 * 60 - 1)
-                if candle_date > date_last_updated:
-                    date_last_updated = candle_date
+                date_last_updated = candle_date
                 ma_limit = cur_200ma
                 break
 
         if ma_limit:
             print(f"ma_limit set at {ma_limit} from {convert_epoch_to_utc(candle[CANDLE_TIME])} (UTC)")
         else:
-            print(f"The 200MA was not breached through {convert_epoch_to_utc(fifteen_minute_candles[200][CANDLE_TIME])}")
+            print(f"The 200MA was not breached through {convert_epoch_to_utc(furthest_candle_date)}")
 
     """
         We'll retrieve the most recent 300 1-minute candles so this must be run at least
