@@ -374,7 +374,7 @@ if __name__ == "__main__":
                 # Price has moved further in the ~5min lag time
                 recent_extreme = current_price
 
-    if use_ma_limit:
+    if use_ma_limit and ma_limit:
         if (percent_diff < 0 and ma_limit > recent_extreme) or (percent_diff > 0 and ma_limit < recent_extreme):
             # Constrain the recent_extreme by the ma_limit
             print(f"Using MA limit: {recent_extreme} moved to {ma_limit}")
